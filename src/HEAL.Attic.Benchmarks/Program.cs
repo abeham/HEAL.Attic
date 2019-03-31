@@ -9,6 +9,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Runtime.Serialization.Formatters.Binary;
 
 namespace HEAL.Attic.Benchmarks {
   public class Program {
@@ -162,6 +164,7 @@ namespace HEAL.Attic.Benchmarks {
     }
 
     [StorableType("03DF0814-07A1-4DFE-9D8A-A8B328CD6B50")]
+    [Serializable]
     class Node {
       [Storable]
       public List<Node> children;
@@ -187,6 +190,7 @@ namespace HEAL.Attic.Benchmarks {
     }
 
     [StorableType("B9C2AA20-A18C-4124-90B8-B181BF7691B4")]
+    [Serializable]
     private class ListNode {
       [Storable]
       public ListNode Next;
@@ -203,43 +207,89 @@ namespace HEAL.Attic.Benchmarks {
 
 
     private static void Benchmark(Func<int, Random, object> createObj) {
-      var sw = new Stopwatch();
-      var serializer = new ProtoBufSerializer();
-      long serializationTime = 0;
-      long deserializationTime = 0;
       var rand = new Random(1234);
       long fileSize = 0;
-      Console.WriteLine("| Elements | Serialization time (ms) | Deserialization time (ms) | File size (kB) | avg. bytes per element |");
-      Console.WriteLine("|---------:|------------------------:|--------------------------:|---------------:|------------------------|");
+      Console.WriteLine("| Method | Elements | Serialization time (ms) | Deserialization time (ms) | File size (kB) | avg. bytes per element |");
+      Console.WriteLine("|-------:|---------:|------------------------:|--------------------------:|---------------:|------------------------|");
       for (int e = 13; e <= 21; e++) {
-        for (int reps = 0; reps < REPS; reps++) {
-          var obj = createObj(1 << e, rand);
-          sw.Reset();
-          sw.Start();
-
-          byte[] buf;
-
-          using (var memStream = new MemoryStream()) {
-            serializer.Serialize(obj, memStream, false);
-            buf = memStream.GetBuffer();
-            fileSize = memStream.Position;
-          }
-          sw.Stop();
-          serializationTime += sw.ElapsedMilliseconds;
-
-          var fixedBuf = new byte[fileSize];
-          Array.Copy(buf, fixedBuf, fileSize);
-
-          sw.Reset();
-          sw.Start();
-          using (var memStream = new MemoryStream(fixedBuf))
-            obj = serializer.Deserialize(memStream);
-          sw.Stop();
-          deserializationTime += sw.ElapsedMilliseconds;
-        }
         int numElems = 1 << e;
-        Console.WriteLine($"| {numElems,8} | {serializationTime / (double)REPS,23:N1} | {deserializationTime / (double)REPS,25:N1} | {fileSize / 1024.0,14:N1} | {fileSize / (double)numElems,22:N1} | ");
+
+        object[] objs = Enumerable.Range(0, REPS).Select(x => createObj(1 << e, rand)).ToArray();
+
+        long serializationTime = 0;
+        long deserializationTime = 0;
+
+        for (int reps = 0; reps < REPS; reps++) {
+          (var buf, var time) = RunSerialize(objs[reps], SerializeWithAttic);
+          serializationTime += time;
+          fileSize = buf.Length;
+
+          (_, time) = RunDeserialize(buf, DeserializeWithAttic);
+          deserializationTime += time;
+        }
+        Console.WriteLine($"| Attic  | {numElems,8} | {serializationTime / (double)REPS,23:N1} | {deserializationTime / (double)REPS,25:N1} | {fileSize / 1024.0,14:N1} | {fileSize / (double)numElems,22:N1} | ");
+
+        serializationTime = 0;
+        deserializationTime = 0;
+
+        for (int reps = 0; reps < REPS; reps++) {
+          (var buf, var time) = RunSerialize(objs[reps], SerializeWithBinaryFormatter);
+          serializationTime += time;
+          fileSize = buf.Length;
+
+          (_, time) = RunDeserialize(buf, DeserializeWithBinaryFormatter);
+          deserializationTime += time;
+        }
+        Console.WriteLine($"| BinFor | {numElems,8} | {serializationTime / (double)REPS,23:N1} | {deserializationTime / (double)REPS,25:N1} | {fileSize / 1024.0,14:N1} | {fileSize / (double)numElems,22:N1} | ");
       }
+    }
+
+    private static (byte[], long) RunSerialize(object obj, Func<object, MemoryStream> serialize) {
+      long fileSize;
+
+      byte[] buf;
+      var sw = Stopwatch.StartNew();
+      using (var memStream = serialize(obj)) {
+        buf = memStream.GetBuffer();
+        fileSize = memStream.Position;
+      }
+      sw.Stop();
+
+      var fixedBuf = new byte[fileSize];
+      Array.Copy(buf, fixedBuf, fileSize);
+
+      return (fixedBuf, sw.ElapsedMilliseconds);
+    }
+
+    private static (object, long) RunDeserialize(byte[] buf, Func<MemoryStream, object> deserialize) {
+      object obj;
+
+      var sw = Stopwatch.StartNew();
+      using (var memStream = new MemoryStream(buf))
+        obj = deserialize(memStream);
+      sw.Stop();
+
+      return (obj, sw.ElapsedMilliseconds);
+    }
+
+    private static MemoryStream SerializeWithAttic(object obj) {
+      var memStream = new MemoryStream();
+      new ProtoBufSerializer().Serialize(obj, memStream, false);
+      return memStream;
+    }
+
+    private static object DeserializeWithAttic(MemoryStream stream) {
+      return new ProtoBufSerializer().Deserialize(stream);
+    }
+
+    private static MemoryStream SerializeWithBinaryFormatter(object obj) {
+      var memStream = new MemoryStream();
+      new BinaryFormatter().Serialize(memStream, obj);
+      return memStream;
+    }
+
+    private static object DeserializeWithBinaryFormatter(MemoryStream stream) {
+      return new BinaryFormatter().Deserialize(stream);
     }
   }
 }
